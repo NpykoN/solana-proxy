@@ -501,6 +501,15 @@ app.post('/api/notify-buy', async (req, res) => {
   }
 });
 
+// Global error handler ensures CORS headers on all errors
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err);
+  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, x-chain");
+  res.status(500).json({ error: "Proxy crashed", details: String(err) });
+});
+
 // ----- Start HTTP server -----
 http.createServer(app).listen(PORT, () => {
   console.log(`✅ Proxy listening on port ${PORT}`);
