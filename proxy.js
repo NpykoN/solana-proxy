@@ -89,11 +89,15 @@ app.get('/api/health', (req, res) => {
    1) FAST freshest transactions for a wallet
       A) RPC getSignaturesForAddress (fast, cheap)
       B) Helius parse batch by signatures (rich, typed)
+   Notes:
+     - Added optional `since` query param (unix seconds). If provided, the proxy
+       will filter returned parsed txns to `timestamp > since`.
+     - By default, also restricts returned parsed txns to last 1 hour.
 ---------------------------------------------------------------------------- */
 app.get('/api/helius-fast', async (req, res) => {
   const ctx = '/api/helius-fast';
   try {
-    const { wallet, limit } = req.query;
+    const { wallet, limit, since } = req.query;
     const lim = Math.min(Number(limit) || 40, 100);
     if (!wallet || !HELIUS_API_KEY) {
       return res.status(400).json({ error: 'Missing wallet or API key' });
@@ -104,7 +108,19 @@ app.get('/api/helius-fast', async (req, res) => {
     const cached = cacheFast.get(wallet);
     if (cached && (now - cached.ts) < FAST_TTL_MS) {
       res.set('X-Source', 'cache');
-      return res.json(cached.data);
+      // still apply filtering by time/since when returning cached result
+      let data = cached.data || [];
+      const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
+      const sinceNum = typeof since !== 'undefined' ? Number(since) : null;
+      data = data.filter((tx) => {
+        const ts = tx?.timestamp || tx?.blockTime || tx?.slotTime || null;
+        if (!ts) return false;
+        // enforce last-1-hour window
+        if (ts < oneHourAgo) return false;
+        if (sinceNum && ts <= sinceNum) return false;
+        return true;
+      });
+      return res.json(data);
     }
 
     // If in cooldown due to prior 429, use slow fallback
@@ -119,9 +135,19 @@ app.get('/api/helius-fast', async (req, res) => {
       let slowData;
       try { slowData = JSON.parse(slowTxt); } catch { slowData = []; }
       if (!Array.isArray(slowData)) slowData = slowData?.items || [];
-      cacheFast.set(wallet, { ts: now, data: slowData });
+      // filter slowData to last 1 hour and optional since param
+      const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
+      const sinceNum = typeof since !== 'undefined' ? Number(since) : null;
+      const filteredSlow = slowData.filter((tx) => {
+        const ts = tx?.timestamp || tx?.blockTime || tx?.slotTime || null;
+        if (!ts) return false;
+        if (ts < oneHourAgo) return false;
+        if (sinceNum && ts <= sinceNum) return false;
+        return true;
+      });
+      cacheFast.set(wallet, { ts: now, data: filteredSlow });
       res.set('X-Source', 'slow-fallback-cooldown');
-      return res.json(slowData);
+      return res.json(filteredSlow);
     }
 
     // A) get signatures
@@ -155,9 +181,18 @@ app.get('/api/helius-fast', async (req, res) => {
         let slowData;
         try { slowData = JSON.parse(slowTxt); } catch { slowData = []; }
         if (!Array.isArray(slowData)) slowData = slowData?.items || [];
-        cacheFast.set(wallet, { ts: now, data: slowData });
+        const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
+        const sinceNum = typeof since !== 'undefined' ? Number(since) : null;
+        const filteredSlow = slowData.filter((tx) => {
+          const ts = tx?.timestamp || tx?.blockTime || tx?.slotTime || null;
+          if (!ts) return false;
+          if (ts < oneHourAgo) return false;
+          if (sinceNum && ts <= sinceNum) return false;
+          return true;
+        });
+        cacheFast.set(wallet, { ts: now, data: filteredSlow });
         res.set('X-Source', 'slow-fallback-429');
-        return res.json(slowData);
+        return res.json(filteredSlow);
       }
 
       logErr(ctx, `RPC non-ok ${rpcRes.status}`, t);
@@ -177,9 +212,18 @@ app.get('/api/helius-fast', async (req, res) => {
         let slowData;
         try { slowData = JSON.parse(slowTxt); } catch { slowData = []; }
         if (!Array.isArray(slowData)) slowData = slowData?.items || [];
-        cacheFast.set(wallet, { ts: now, data: slowData });
+        const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
+        const sinceNum = typeof since !== 'undefined' ? Number(since) : null;
+        const filteredSlow = slowData.filter((tx) => {
+          const ts = tx?.timestamp || tx?.blockTime || tx?.slotTime || null;
+          if (!ts) return false;
+          if (ts < oneHourAgo) return false;
+          if (sinceNum && ts <= sinceNum) return false;
+          return true;
+        });
+        cacheFast.set(wallet, { ts: now, data: filteredSlow });
         res.set('X-Source', 'slow-fallback-429-json');
-        return res.json(slowData);
+        return res.json(filteredSlow);
       }
       logErr(ctx, 'RPC error field', JSON.stringify(rpcJson.error));
       return res.status(502).json({ error: 'RPC error', details: rpcJson.error });
@@ -215,9 +259,20 @@ app.get('/api/helius-fast', async (req, res) => {
       return res.status(502).json({ error: 'Helius did not return array', details: parsed });
     }
 
-    cacheFast.set(wallet, { ts: now, data: parsed });
+    // Filter parsed to last 1 hour and optional since param (unix seconds)
+    const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
+    const sinceNum = typeof since !== 'undefined' ? Number(since) : null;
+    const filtered = parsed.filter((tx) => {
+      const ts = tx?.timestamp || tx?.blockTime || tx?.slotTime || null;
+      if (!ts) return false;
+      if (ts < oneHourAgo) return false; // enforce 1-hour window
+      if (sinceNum && ts <= sinceNum) return false;
+      return true;
+    });
+
+    cacheFast.set(wallet, { ts: now, data: filtered });
     res.set('X-Source', 'fast-rpc+parse');
-    res.json(parsed);
+    res.json(filtered);
   } catch (e) {
     logErr(ctx, e);
     res.status(500).json({ error: 'Proxy error', details: String(e.message || e) });
@@ -226,11 +281,12 @@ app.get('/api/helius-fast', async (req, res) => {
 
 /* ----------------------------------------------------------------------------
    2) SLOWER indexer endpoint (fallback / historic)
+   Note: this endpoint now also filters to last-1-hour by default for parity.
 ---------------------------------------------------------------------------- */
 app.get('/api/helius', async (req, res) => {
   const ctx = '/api/helius';
   try {
-    const { wallet, limit } = req.query;
+    const { wallet, limit, since } = req.query;
     if (!wallet || !HELIUS_API_KEY) {
       return res.status(400).json({ error: 'Missing wallet or API key' });
     }
@@ -259,7 +315,18 @@ app.get('/api/helius', async (req, res) => {
       return res.status(502).json({ error: 'Helius did not return an array', details: data });
     }
 
-    res.json(data);
+    // Filter to last 1 hour and optional since param
+    const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
+    const sinceNum = typeof since !== 'undefined' ? Number(since) : null;
+    const filtered = data.filter((tx) => {
+      const ts = tx?.timestamp || tx?.blockTime || tx?.slotTime || null;
+      if (!ts) return false;
+      if (ts < oneHourAgo) return false;
+      if (sinceNum && ts <= sinceNum) return false;
+      return true;
+    });
+
+    res.json(filtered);
   } catch (e) {
     logErr(ctx, e);
     res.status(500).json({ error: 'Proxy error', details: String(e.message || e) });
